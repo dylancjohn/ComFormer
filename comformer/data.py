@@ -106,7 +106,25 @@ def load_pyg_graphs(
             use_angle=use_angle,
         )
     
-    graphs = df["atoms"].parallel_apply(atoms_to_graph).values
+    # A single parallel_apply() over the whole split hands every worker a
+    # chunk sized total_rows/nb_workers, and holds every worker's full
+    # result in memory at once for the transfer back to the main process.
+    # Peak memory therefore scales with the *split* size (e.g. 60000 for
+    # the MP train split), not just the worker count -- capping workers
+    # alone (see pandarallel.initialize() above) fixed the earlier OOM at
+    # smoke-test scale but not at full scale. Process it in bounded chunks
+    # instead, so peak memory is ~constant regardless of split size; each
+    # chunk's intermediate memory is freed before the next chunk starts.
+    chunk_size = int(os.environ.get("COMFORMER_GRAPH_CHUNK_SIZE", "5000"))
+    atoms_series = df["atoms"]
+    if len(atoms_series) <= chunk_size:
+        graphs = atoms_series.parallel_apply(atoms_to_graph).values
+    else:
+        chunks = []
+        for start in range(0, len(atoms_series), chunk_size):
+            chunk = atoms_series.iloc[start : start + chunk_size]
+            chunks.append(chunk.parallel_apply(atoms_to_graph).values)
+        graphs = np.concatenate(chunks)
     # graphs = df["atoms"].apply(atoms_to_graph).values
 
     return graphs

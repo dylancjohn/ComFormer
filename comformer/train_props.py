@@ -21,6 +21,7 @@ def train_prop_model(
     val_ratio=None,
     test_ratio=None,
     learning_rate=0.001,
+    criterion=None,
     batch_size=None,
     scheduler=None,
     n_epochs=None,
@@ -51,6 +52,8 @@ def train_prop_model(
     """Train models for a dataset and a property."""
     if scheduler is None:
         scheduler = "onecycle"
+    if criterion is None:
+        criterion = "mse"
     if batch_size is None:
         batch_size = 64
     if n_epochs is None:
@@ -64,8 +67,7 @@ def train_prop_model(
         "batch_size": batch_size,
         "weight_decay": 1e-05,
         "learning_rate": learning_rate,
-        "criterion": "mse",
-        # "criterion": "l1",
+        "criterion": criterion,
         "optimizer": "adamw",
         "scheduler": scheduler,
         "save_dataloader": save_dataloader,

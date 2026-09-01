@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.typing import Adj, OptTensor, PairTensor
-from comforemr.models.utils import softmax
+from comformer.models.utils import softmax
 from torch_scatter import scatter
 
 
@@ -31,7 +31,7 @@ class ComformerConv(MessagePassing):
         **kwargs,
     ):
         kwargs.setdefault('aggr', 'add')
-        super(MatformerConv, self).__init__(node_dim=0, **kwargs)
+        super(ComformerConv, self).__init__(node_dim=0, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels

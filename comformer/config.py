@@ -166,6 +166,12 @@ class TrainingConfig(BaseSettings):
     store_outputs: bool = True
     progress: bool = True
     log_tensorboard: bool = False
+    log_wandb: bool = False
+    wandb_project: Optional[str] = None
+    wandb_entity: Optional[str] = None
+    wandb_run_name: Optional[str] = None
+    wandb_run_id: Optional[str] = None
+    resume_checkpoint: Optional[str] = None
     standard_scalar_and_pca: bool = False
     use_canonize: bool = True
     num_workers: int = 2

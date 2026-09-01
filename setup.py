@@ -27,6 +27,9 @@ setuptools.setup(
         "pydocstyle>=6.0.0",
         "pyparsing>=2.2.1,<3",
     ],
+    extras_require={
+        "wandb": ["wandb>=0.15.0"],
+    },
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/divelab/AIRS",

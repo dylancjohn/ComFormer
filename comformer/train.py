@@ -177,7 +177,24 @@ def train_main(
     f.close()
     global tmp_output_dir
     tmp_output_dir = config.output_dir
-    pprint.pprint(tmp) 
+    pprint.pprint(tmp)
+
+    if config.log_wandb:
+        import wandb
+
+        wandb.init(
+            project=config.wandb_project or "comformer",
+            entity=config.wandb_entity,
+            name=config.wandb_run_name,
+            id=config.wandb_run_id,
+            resume="allow" if config.wandb_run_id else None,
+            config=tmp,
+        )
+        # Reuse this run's auto-generated id for a later resume: pass it back
+        # in as wandb_run_id (alongside resume_checkpoint) to keep logging
+        # into the same run instead of starting a disconnected new one.
+        print("wandb run id:", wandb.run.id)
+
     if config.classification_threshold is not None:
         classification = True
     if config.random_seed is not None:
@@ -330,6 +347,24 @@ def train_main(
         prepare_batch=prepare_batch,
         device=device,
     )
+
+    if config.resume_checkpoint is not None:
+        # Restores model + optimizer + lr_scheduler + trainer engine state
+        # (epoch/iteration counters included) from a checkpoint written by
+        # the Checkpoint handler below (checkpoint_<epoch>.pt in output_dir).
+        # Because the trainer's own state is restored, the trainer.run(...)
+        # call further down picks up at the next epoch instead of epoch 1.
+        print("Resuming from checkpoint:", config.resume_checkpoint)
+        to_load = {
+            "model": net,
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler,
+            "trainer": trainer,
+        }
+        resume_state = torch.load(config.resume_checkpoint, map_location=device)
+        Checkpoint.load_objects(to_load=to_load, checkpoint=resume_state)
+        print("Resumed at epoch:", trainer.state.epoch)
+
     if test_only:
         checkpoint_tmp = torch.load('/data/keqiangyan/Matformer/matformer/scripts/jarvis_results_new/ehull_inv_25nei/checkpoint_500.pt')
         to_load = {
@@ -361,6 +396,11 @@ def train_main(
         predictions = np.array(predictions) * std_train
         print("Test MAE:", mean_absolute_error(targets, predictions))
         print("Total test time:", t2-t1)
+        if config.log_wandb:
+            import wandb
+
+            wandb.log({"test_mae": float(mean_absolute_error(targets, predictions))})
+            wandb.finish()
         return mean_absolute_error(targets, predictions)
 
     # ignite event handlers:
@@ -469,6 +509,24 @@ def train_main(
             else:
                 pbar.log_message(f"Train ROC AUC: {tmetrics['rocauc']:.4f}")
                 pbar.log_message(f"Val ROC AUC: {vmetrics['rocauc']:.4f}")
+
+        if config.log_wandb:
+            import wandb
+
+            log_dict = {
+                "epoch": epoch_num,
+                "val_loss": float(vmetrics["loss"]),
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+            if not classification:
+                log_dict["val_mae"] = float(vmetrics["mae"])
+                if tmetrics.get("mae", -1) != -1:
+                    log_dict["train_mae"] = float(tmetrics["mae"])
+            else:
+                log_dict["val_rocauc"] = float(vmetrics["rocauc"])
+                if "rocauc" in tmetrics:
+                    log_dict["train_rocauc"] = float(tmetrics["rocauc"])
+            wandb.log(log_dict, step=epoch_num)
 
     if config.n_early_stopping is not None:
         if classification:
@@ -599,8 +657,18 @@ def train_main(
         from sklearn.metrics import mean_absolute_error
         targets = np.array(targets) * std_train
         predictions = np.array(predictions) * std_train
-        print("Test MAE:", mean_absolute_error(targets, predictions))
-        
+        test_mae = mean_absolute_error(targets, predictions)
+        print("Test MAE:", test_mae)
+        if config.log_wandb:
+            import wandb
+
+            wandb.log({"test_mae": float(test_mae)})
+
+    if config.log_wandb:
+        import wandb
+
+        wandb.finish()
+
     return history
 
 

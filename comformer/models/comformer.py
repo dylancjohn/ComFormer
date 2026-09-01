@@ -1,11 +1,10 @@
 """Implementation based on the template of Matformer."""
 
-from typing import Tuple
+from typing import Literal, Tuple
 import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pydantic.typing import Literal
 from torch import nn
 from comformer.models.utils import RBFExpansion
 from comformer.utils import BaseSettings

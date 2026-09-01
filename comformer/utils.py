@@ -5,18 +5,35 @@ from pathlib import Path
 from typing import Union
 import matplotlib.pyplot as plt
 
-from pydantic import BaseSettings as PydanticBaseSettings
+try:
+    # pydantic>=2 (moved BaseSettings out to the separate pydantic-settings
+    # package; installed automatically by the "wandb" extra, since wandb
+    # itself requires pydantic>=2.6).
+    from pydantic_settings import BaseSettings as PydanticBaseSettings
+    from pydantic_settings import SettingsConfigDict
+
+    _PYDANTIC_V2 = True
+except ImportError:
+    # pydantic<2 (BaseSettings still lived in pydantic itself).
+    from pydantic import BaseSettings as PydanticBaseSettings
+
+    _PYDANTIC_V2 = False
 
 
 class BaseSettings(PydanticBaseSettings):
     """Add configuration to default Pydantic BaseSettings."""
 
-    class Config:
-        """Configure BaseSettings behavior."""
+    if _PYDANTIC_V2:
+        model_config = SettingsConfigDict(
+            extra="forbid", use_enum_values=True, env_prefix="jv_"
+        )
+    else:
+        class Config:
+            """Configure BaseSettings behavior."""
 
-        extra = "forbid"
-        use_enum_values = True
-        env_prefix = "jv_"
+            extra = "forbid"
+            use_enum_values = True
+            env_prefix = "jv_"
 
 
 def plot_learning_curve(

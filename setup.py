@@ -19,7 +19,12 @@ setuptools.setup(
         "tqdm>=4.60.0",
         "pandas>=1.2.3",
         "pytorch-ignite>=0.4.7",
-        "pydantic>=1.8.1,<2",
+        # Works with pydantic v1 (<2) or v2 (>=2, via comformer.utils'
+        # compat shim -- see that module for why). Only >=2 satisfies
+        # wandb's own pydantic>=2.6 requirement, so installing the
+        # "wandb" extra below will pull pydantic up to v2 if it isn't
+        # already.
+        "pydantic>=1.8.1",
         "e3nn>=0.5.0",
         "pandarallel>=1.5.0",
         "flake8>=3.9.1",
@@ -28,7 +33,9 @@ setuptools.setup(
         "pyparsing>=2.2.1,<3",
     ],
     extras_require={
-        "wandb": ["wandb>=0.15.0"],
+        # pydantic-settings supplies BaseSettings for pydantic>=2, since
+        # pydantic itself dropped it -- see comformer/utils.py.
+        "wandb": ["wandb>=0.15.0", "pydantic-settings>=2.0.0"],
     },
     long_description=long_description,
     long_description_content_type="text/markdown",

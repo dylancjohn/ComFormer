@@ -2,12 +2,11 @@
 """Implementation based on the template of Matformer."""
 
 import subprocess
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 import os
 from pydantic import root_validator
 
 # vfrom pydantic import Field, root_validator, validator
-from pydantic.typing import Literal
 from comformer.utils import BaseSettings
 from comformer.models.comformer import iComformerConfig, eComformerConfig
 
@@ -192,7 +191,7 @@ class TrainingConfig(BaseSettings):
         eComformerConfig,
     ] = iComformerConfig(name="iComformer")
     print(model)
-    @root_validator()
+    @root_validator(skip_on_failure=True)
     def set_input_size(cls, values):
         """Automatically configure node feature dimensionality."""
         values["model"].atom_input_features = FEATURESET_SIZE[

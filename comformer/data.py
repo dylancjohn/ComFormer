@@ -19,7 +19,15 @@ from tqdm import tqdm
 import math
 from jarvis.db.jsonutils import dumpjson
 from pandarallel import pandarallel
-pandarallel.initialize(progress_bar=False)
+# One worker per logical CPU (pandarallel's default) is too many on a node
+# with a high core count: each worker holds its own working set while
+# building k-nearest-neighbor crystal graphs (numpy arrays, KDTree results,
+# PyG Data objects -- bigger for MP structures with hundreds of atoms), and
+# that many simultaneous workers can OOM the job well before the CPUs
+# themselves are the bottleneck. Cap it, overridable via env var without
+# needing another code change.
+_PANDARALLEL_WORKERS = int(os.environ.get("COMFORMER_NUM_WORKERS", "16"))
+pandarallel.initialize(nb_workers=_PANDARALLEL_WORKERS, progress_bar=False)
 # from sklearn.pipeline import Pipeline
 import pickle as pk
 from sklearn.preprocessing import StandardScaler

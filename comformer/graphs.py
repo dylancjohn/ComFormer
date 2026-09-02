@@ -2,6 +2,7 @@
 """Implementation based on the template of Matformer."""
 from multiprocessing.context import ForkContext
 from re import X
+import os
 import numpy as np
 import pandas as pd
 from jarvis.core.specie import chem_data, get_node_attributes
@@ -217,6 +218,7 @@ def nearest_neighbor_edges_submit(
     use_canonize=False,
     use_lattice=False,
     use_angle=False,
+    _attempt=0,
 ):
     """Construct k-NN edge list."""
     # returns List[List[Tuple[site, distance, index, image]]]
@@ -224,14 +226,33 @@ def nearest_neighbor_edges_submit(
     all_neighbors_now = atoms.get_all_neighbors(r=cutoff)
     min_nbrs = min(len(neighborlist) for neighborlist in all_neighbors_now)
 
-    attempt = 0
-    if min_nbrs < max_neighbors:
-        lat = atoms.lattice
-        if cutoff < max(lat.a, lat.b, lat.c):
-            r_cut = max(lat.a, lat.b, lat.c)
-        else:
-            r_cut = 2 * cutoff
-        attempt += 1
+    # If the current cutoff doesn't reach max_neighbors for every atom, the
+    # original code retried with a doubled cutoff via unbounded recursion --
+    # there was an `attempt` counter here, but it was never actually passed
+    # through to the recursive call or checked against any limit, so it was
+    # dead code and nothing capped how many times this could recurse.
+    #
+    # The original growth rule was also directly wrong, not just unbounded:
+    # `if cutoff < max(lat.a, lat.b, lat.c): r_cut = max(lat.a, lat.b, lat.c)`
+    # jumps the cutoff straight to the lattice's own largest dimension on
+    # the very first retry. For a highly anisotropic lattice (confirmed
+    # directly -- mp-1006594, lattice vectors [3.17, 3.17, 123.19]
+    # Angstrom, a 2D-like slab with a large vacuum-spacing axis) that one
+    # jump overshoots massively: max_neighbors=25 was already satisfied at
+    # r=8 (129 neighbors found), but the old rule jumped straight to
+    # r=123, where each of the 75 atoms has *thousands* of candidates to
+    # sort and process -- 405s and tens of GB for that single structure,
+    # not because the search itself is slow, but because of how much
+    # more there is to sort/canonicalize afterwards once it overshoots.
+    # Grow gradually (plain doubling, no special-case jump) instead, so it
+    # settles at the smallest sufficient radius rather than the lattice's
+    # own size. An attempt-count and absolute-cutoff cap are kept as a
+    # defensive fallback in case some other structure's true neighbor
+    # count genuinely needs many doublings.
+    _MAX_ATTEMPTS = int(os.environ.get("COMFORMER_MAX_NEIGHBOR_ATTEMPTS", "8"))
+    _MAX_CUTOFF = float(os.environ.get("COMFORMER_MAX_NEIGHBOR_CUTOFF", "40.0"))
+    if min_nbrs < max_neighbors and _attempt < _MAX_ATTEMPTS and cutoff < _MAX_CUTOFF:
+        r_cut = min(2 * cutoff, _MAX_CUTOFF)
         return nearest_neighbor_edges_submit(
             atoms=atoms,
             use_canonize=use_canonize,
@@ -239,11 +260,23 @@ def nearest_neighbor_edges_submit(
             max_neighbors=max_neighbors,
             id=id,
             use_lattice=use_lattice,
+            use_angle=use_angle,
+            _attempt=_attempt + 1,
         )
-    
+    if min_nbrs < max_neighbors:
+        print(
+            f"Warning: only found {min_nbrs} neighbors (< max_neighbors="
+            f"{max_neighbors}) for the least-connected atom after "
+            f"{_attempt} cutoff-expansion attempts (reached cutoff="
+            f"{cutoff:.1f}); proceeding anyway rather than expanding "
+            f"further. id={id}"
+        )
+
     edges = defaultdict(set)
-    # lattice correction process
-    r_cut = max(lat.a, lat.b, lat.c) + 1e-2
+    # lattice correction process -- same cap applies, see above; a highly
+    # anisotropic structure's own max(lat.a, lat.b, lat.c) can itself be
+    # the pathological value even when the retry loop above never fires.
+    r_cut = min(max(lat.a, lat.b, lat.c) + 1e-2, _MAX_CUTOFF)
     all_neighbors = atoms.get_all_neighbors(r=r_cut)
     neighborlist = all_neighbors[0]
     neighborlist = sorted(neighborlist, key=lambda x: x[2])

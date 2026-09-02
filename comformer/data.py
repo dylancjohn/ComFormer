@@ -11,6 +11,8 @@ import os
 import torch
 import numpy as np
 import pandas as pd
+import multiprocessing as mp
+from functools import partial
 from jarvis.core.atoms import Atoms
 from comformer.graphs import PygGraph, PygStructureDataset
 from jarvis.db.figshare import data as jdata
@@ -18,16 +20,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import math
 from jarvis.db.jsonutils import dumpjson
-from pandarallel import pandarallel
-# One worker per logical CPU (pandarallel's default) is too many on a node
-# with a high core count: each worker holds its own working set while
-# building k-nearest-neighbor crystal graphs (numpy arrays, KDTree results,
-# PyG Data objects -- bigger for MP structures with hundreds of atoms), and
-# that many simultaneous workers can OOM the job well before the CPUs
-# themselves are the bottleneck. Cap it, overridable via env var without
-# needing another code change.
-_PANDARALLEL_WORKERS = int(os.environ.get("COMFORMER_NUM_WORKERS", "16"))
-pandarallel.initialize(nb_workers=_PANDARALLEL_WORKERS, progress_bar=False)
 # from sklearn.pipeline import Pipeline
 import pickle as pk
 from sklearn.preprocessing import StandardScaler
@@ -68,6 +60,51 @@ def mean_absolute_deviation(data, axis=None):
     """Get Mean absolute deviation."""
     return np.mean(np.absolute(data - np.mean(data, axis)), axis)
 
+
+def _init_graph_worker():
+    """Pool initializer: keep each forked worker single-threaded.
+
+    Without this, each worker process's own torch (if it touches any CPU
+    tensor op) can spin up its own OpenMP/MKL thread pool on top of an
+    already-forked process -- the same class of hazard that caused a real
+    pandarallel/torch deadlock earlier. OMP_NUM_THREADS=1 in the job's
+    environment should already cover this, but set it defensively here
+    too so it doesn't depend on the caller remembering the env var.
+    """
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+def _atoms_dict_to_pyg_graph(
+    atoms_dict,
+    neighbor_strategy,
+    cutoff,
+    max_neighbors,
+    use_canonize,
+    use_lattice,
+    use_angle,
+):
+    """Module-level (picklable) worker fn: one structure dict -> one graph.
+
+    Must stay top-level, not a closure, so plain multiprocessing.Pool can
+    pickle and ship it to worker processes.
+    """
+    structure = Atoms.from_dict(atoms_dict)
+    return PygGraph.atom_dgl_multigraph(
+        structure,
+        neighbor_strategy=neighbor_strategy,
+        cutoff=cutoff,
+        atom_features="atomic_number",
+        max_neighbors=max_neighbors,
+        compute_line_graph=False,
+        use_canonize=use_canonize,
+        use_lattice=use_lattice,
+        use_angle=use_angle,
+    )
+
+
 def load_pyg_graphs(
     df: pd.DataFrame,
     name: str = "dft_3d",
@@ -91,40 +128,49 @@ def load_pyg_graphs(
           edata_schemes={'r': Scheme(shape=(3,)})
     ```
     """
-    def atoms_to_graph(atoms):
-        """Convert structure dict to DGLGraph."""
-        structure = Atoms.from_dict(atoms)
-        return PygGraph.atom_dgl_multigraph(
-            structure,
-            neighbor_strategy=neighbor_strategy,
-            cutoff=cutoff,
-            atom_features="atomic_number",
-            max_neighbors=max_neighbors,
-            compute_line_graph=False,
-            use_canonize=use_canonize,
-            use_lattice=use_lattice,
-            use_angle=use_angle,
-        )
-    
-    # A single parallel_apply() over the whole split hands every worker a
-    # chunk sized total_rows/nb_workers, and holds every worker's full
-    # result in memory at once for the transfer back to the main process.
-    # Peak memory therefore scales with the *split* size (e.g. 60000 for
-    # the MP train split), not just the worker count -- capping workers
-    # alone (see pandarallel.initialize() above) fixed the earlier OOM at
-    # smoke-test scale but not at full scale. Process it in bounded chunks
-    # instead, so peak memory is ~constant regardless of split size; each
-    # chunk's intermediate memory is freed before the next chunk starts.
+    # Measured directly (see commit history): the *final* built graphs for
+    # even 10k real MP structures only total ~600MB of tensor data, and
+    # building them doesn't grow the main process's RSS at all -- so the
+    # 190GB+ OOMs seen in practice were not from the final data volume.
+    # pandarallel's own long-lived worker pool (persisting for the whole
+    # process, reused across every parallel_apply() call, including once
+    # per chunk in the earlier chunked attempt) was the suspect: any
+    # per-call growth in a persistent worker's own memory never gets a
+    # chance to be reclaimed by the OS. Using a *fresh* multiprocessing.Pool
+    # per chunk, fully torn down (pool.close()+pool.join()) before the next
+    # chunk starts, removes that possibility entirely regardless of
+    # whether it was actually the cause -- each chunk's workers, and
+    # whatever they accumulated, are guaranteed gone before the next chunk.
     chunk_size = int(os.environ.get("COMFORMER_GRAPH_CHUNK_SIZE", "5000"))
-    atoms_series = df["atoms"]
-    if len(atoms_series) <= chunk_size:
-        graphs = atoms_series.parallel_apply(atoms_to_graph).values
-    else:
-        chunks = []
-        for start in range(0, len(atoms_series), chunk_size):
-            chunk = atoms_series.iloc[start : start + chunk_size]
-            chunks.append(chunk.parallel_apply(atoms_to_graph).values)
-        graphs = np.concatenate(chunks)
+    nb_workers = int(os.environ.get("COMFORMER_NUM_WORKERS", "16"))
+    atoms_list = df["atoms"].tolist()
+    worker_fn = partial(
+        _atoms_dict_to_pyg_graph,
+        neighbor_strategy=neighbor_strategy,
+        cutoff=cutoff,
+        max_neighbors=max_neighbors,
+        use_canonize=use_canonize,
+        use_lattice=use_lattice,
+        use_angle=use_angle,
+    )
+    ctx = mp.get_context("fork")
+    results = []
+    for start in range(0, len(atoms_list), chunk_size):
+        chunk = atoms_list[start : start + chunk_size]
+        with ctx.Pool(processes=nb_workers, initializer=_init_graph_worker) as pool:
+            results.extend(pool.map(worker_fn, chunk, chunksize=1))
+        # Pool.__exit__ already calls terminate(); join explicitly too so
+        # we don't move on to the next chunk before workers have actually
+        # exited and released their memory back to the OS.
+        pool.join()
+    # np.array(results, dtype=object) is NOT safe here: PyG Data objects
+    # implement __len__/__getitem__, so numpy tries to introspect them as
+    # array-like and build a nested/ragged array instead of treating each
+    # one as an opaque scalar. Build the object array by explicit
+    # assignment instead, which always stores references as-is.
+    graphs = np.empty(len(results), dtype=object)
+    for i, r in enumerate(results):
+        graphs[i] = r
     # graphs = df["atoms"].apply(atoms_to_graph).values
 
     return graphs

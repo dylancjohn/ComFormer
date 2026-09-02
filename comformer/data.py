@@ -14,7 +14,12 @@ import pandas as pd
 import multiprocessing as mp
 from functools import partial
 from jarvis.core.atoms import Atoms
-from comformer.graphs import PygGraph, PygStructureDataset
+from comformer.graphs import (
+    PygGraph,
+    PygStructureDataset,
+    data_to_numpy_dict,
+    numpy_dict_to_data,
+)
 from jarvis.db.figshare import data as jdata
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -92,7 +97,7 @@ def _atoms_dict_to_pyg_graph(
     pickle and ship it to worker processes.
     """
     structure = Atoms.from_dict(atoms_dict)
-    return PygGraph.atom_dgl_multigraph(
+    g = PygGraph.atom_dgl_multigraph(
         structure,
         neighbor_strategy=neighbor_strategy,
         cutoff=cutoff,
@@ -103,6 +108,12 @@ def _atoms_dict_to_pyg_graph(
         use_lattice=use_lattice,
         use_angle=use_angle,
     )
+    # Convert to numpy before crossing the Pool boundary -- see
+    # data_to_numpy_dict's docstring. Returning the Data object directly
+    # here made every tensor go through torch's shared-memory/mmap
+    # reduction, which exhausted shared memory under real load (many
+    # small tensors, many structures per chunk).
+    return data_to_numpy_dict(g)
 
 
 def load_pyg_graphs(
@@ -170,7 +181,11 @@ def load_pyg_graphs(
     # assignment instead, which always stores references as-is.
     graphs = np.empty(len(results), dtype=object)
     for i, r in enumerate(results):
-        graphs[i] = r
+        # Each result crossed the Pool boundary as a numpy-dict (see
+        # _atoms_dict_to_pyg_graph); rebuild the actual Data object now,
+        # back in the main process, away from torch's per-tensor
+        # shared-memory reduction.
+        graphs[i] = numpy_dict_to_data(r)
     # graphs = df["atoms"].apply(atoms_to_graph).values
 
     return graphs

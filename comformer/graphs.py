@@ -24,6 +24,40 @@ except Exception as exp:
     pass
 
 
+def data_to_numpy_dict(data):
+    """Convert a PyG Data object's tensor fields to numpy for transport
+    across a plain multiprocessing.Pool boundary.
+
+    torch registers a custom pickler for Tensor/Storage that hands off
+    CPU tensors via a shared-memory file descriptor + mmap, for
+    zero-copy transfer -- a win for a few large GPU tensors, but for
+    many small per-structure tensors (one Data object per crystal
+    structure, several tensors each, thousands of structures per chunk)
+    it means thousands of shared-memory segments get created rapidly,
+    which can exhaust available shared memory (RuntimeError: unable to
+    mmap ...: Cannot allocate memory) well before real RAM is the
+    limit. We don't need zero-copy sharing for CPU data here; plain
+    numpy arrays pickle normally (inline bytes, no fd/mmap) and are
+    both cheaper and immune to this failure mode.
+    """
+    return {
+        key: (value.numpy().copy() if isinstance(value, torch.Tensor) else value)
+        for key, value in data.items()
+    }
+
+
+def numpy_dict_to_data(d):
+    """Inverse of data_to_numpy_dict: rebuild a PyG Data object, turning
+    numpy arrays back into torch tensors (torch.from_numpy infers the
+    correct dtype from the array's own dtype automatically)."""
+    return Data(
+        **{
+            key: (torch.from_numpy(value) if isinstance(value, np.ndarray) else value)
+            for key, value in d.items()
+        }
+    )
+
+
 def angle_from_array(a, b, lattice):
     a_new = np.dot(a, lattice)
     b_new = np.dot(b, lattice)
@@ -83,6 +117,7 @@ class PygStructureDataset(torch.utils.data.Dataset):
         nolinegraph=False,
         mean_train=None,
         std_train=None,
+        already_featurized=False,
     ):
         """Pytorch Dataset for atomistic graphs.
 
@@ -112,18 +147,27 @@ class PygStructureDataset(torch.utils.data.Dataset):
 
         self.transform = transform
 
-        features = self._get_attribute_lookup(atom_features)
+        # already_featurized=True means the graphs' g.x is already the
+        # final atom_features vector (e.g. CGCNN), not a raw atomic
+        # number -- true for a graph that already went through this
+        # exact remap once (e.g. reloaded from a cache built by running
+        # this same __init__ on a different machine). Running the remap
+        # a second time on an already-featurized g.x silently produces
+        # garbage (indexing the CGCNN feature table with values that
+        # aren't atomic numbers), so this must be explicit, not inferred.
+        if not already_featurized:
+            features = self._get_attribute_lookup(atom_features)
 
-        # load selected node representation
-        # assume graphs contain atomic number in g.ndata["atom_features"]
-        for g in graphs:
-            z = g.x
-            g.atomic_number = z
-            z = z.type(torch.IntTensor).squeeze()
-            f = torch.tensor(features[z]).type(torch.FloatTensor)
-            if g.x.size(0) == 1:
-                f = f.unsqueeze(0)
-            g.x = f
+            # load selected node representation
+            # assume graphs contain atomic number in g.ndata["atom_features"]
+            for g in graphs:
+                z = g.x
+                g.atomic_number = z
+                z = z.type(torch.IntTensor).squeeze()
+                f = torch.tensor(features[z]).type(torch.FloatTensor)
+                if g.x.size(0) == 1:
+                    f = f.unsqueeze(0)
+                g.x = f
 
         self.prepare_batch = prepare_pyg_batch
         if line_graph:

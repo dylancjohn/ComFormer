@@ -251,6 +251,15 @@ def train_main(
         val_loader = train_val_test_loaders[1]
         test_loader = train_val_test_loaders[2]
         prepare_batch = train_val_test_loaders[3]
+        # mean_train/std_train were never part of this tuple's contract --
+        # get_train_val_loaders always returns them (see the other branch),
+        # but this branch never set them at all, so `if std_train is None`
+        # a few lines down would raise UnboundLocalError for every caller
+        # of this path (i.e. it was never actually exercised before).
+        # Accept them as optional 5th/6th elements; fall back to the same
+        # None -> 1.0 default the other branch already relies on.
+        mean_train = train_val_test_loaders[4] if len(train_val_test_loaders) > 4 else None
+        std_train = train_val_test_loaders[5] if len(train_val_test_loaders) > 5 else None
     prepare_batch = partial(prepare_batch, device=device)
     if classification:
         config.model.classification = True
